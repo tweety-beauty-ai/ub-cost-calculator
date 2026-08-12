@@ -146,12 +146,16 @@ def calc_uk(p_eur, s_gbp):
     s    = s_gbp / (1 + uk_vat)
     ref  = s * ref_uk
     dsf  = (ref + fba_gbp) * dsf_rate
-    # UK spreadsheet: PPU = sell_ex_vat - COGS - FBA - Referral (DSF shown but not deducted from PPU)
-    ppu  = s - cogs - fba_gbp - ref
+    # The digital services fee is charged by our country of establishment
+    # (Spain = 3%), so it applies on UK exactly as on AU/CA and IS deducted from
+    # profit. The original UK spreadsheet showed it without deducting it, which
+    # overstated UK ROI by ~1pp.
+    fees = ref + fba_gbp + dsf
+    ppu  = s - cogs - fees
     roi  = ppu / cogs if cogs > 0 else 0
     return dict(cur="GBP", purchase=p, ship_labor=sl, tariff_gst=None,
                 cogs=cogs, sell_ex=s, ref=ref, fba=fba_gbp, dsf=dsf,
-                fees=ref + fba_gbp + dsf, ppu=ppu, roi=roi,
+                fees=fees, ppu=ppu, roi=roi,
                 tax_note=f"VAT {uk_vat:.0%} stripped from sell price")
 
 def calc_au(p_eur, s_aud):
