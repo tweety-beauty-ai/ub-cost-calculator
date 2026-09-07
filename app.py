@@ -22,6 +22,7 @@ DEFAULTS = {
     "uk_ship": 0.80,  "uk_lab": 2.35,  "uk_fba": 3.09, "uk_ref": 15.0, "uk_vat": 20.0,
     "au_ship": 10.40, "au_lab": 2.35,  "au_fba": 7.30, "au_ref": 13.0, "au_gst": 10.0, "au_tar": 5.0,
     "ca_ship": 3.12,  "ca_lab": 2.35,  "ca_fba": 7.33, "ca_ref": 15.0,
+    "us_ship": 3.34,  "us_lab": 2.35,  "us_fba": 5.43, "us_ref": 15.0, "us_tar": 10.0,
 }
 
 def load_config():
@@ -107,6 +108,16 @@ with st.sidebar:
         ref_ca      = st.number_input("Referral fee (%)",      value=cfg["ca_ref"],  step=0.5,  format="%.1f", key="ca_ref") / 100
         st.caption("All results in USD. Sell price (CAD) and FBA (CAD) converted to USD internally.")
 
+    with st.expander("🇺🇸  US Parameters", expanded=True):
+        us_shipping = st.number_input("Shipping / unit (EUR)", value=cfg["us_ship"], step=0.10, format="%.2f", key="us_ship")
+        us_labor    = st.number_input("Labor / unit (EUR)",    value=cfg["us_lab"],  step=0.10, format="%.2f", key="us_lab")
+        fba_us      = st.number_input("FBA fee (USD)",         value=cfg["us_fba"],  step=0.01, format="%.2f", key="us_fba")
+        ref_us      = st.number_input("Referral fee (%)",      value=cfg["us_ref"],  step=0.5,  format="%.1f", key="us_ref") / 100
+        us_tariff   = st.number_input("Import tariff (%)",     value=cfg["us_tar"],  step=0.5,  format="%.1f", key="us_tar") / 100
+        st.caption("Import tariff in COGS (on product + shipping). No sales tax stripped — "
+                   "Amazon collects and remits it. Digital svc fee on the referral fee ONLY, "
+                   "which is what Seller Snap shows for US.")
+
     st.markdown("---")
     if st.button("💾 Save Parameters", use_container_width=True):
         save_config()
@@ -115,7 +126,7 @@ with st.sidebar:
 # ─── PRODUCT INPUT ────────────────────────────────────────────────────────────
 
 st.subheader("COGS and ROI per market")
-c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1])
+c1, c2, c3, c4, c5 = st.columns([1.2, 1, 1, 1, 1])
 
 with c1:
     purchase_eur = st.number_input(
@@ -139,6 +150,12 @@ with c4:
         "Sell CA (CAD, excl GST)",
         min_value=0.0, value=0.0, step=1.0, format="%.2f",
         help="CAD listing price — converted to USD internally for all calculations"
+    )
+with c5:
+    sell_usd_in = st.number_input(
+        "Sell US (USD)",
+        min_value=0.0, value=0.0, step=1.0, format="%.2f",
+        help="Amazon US listing price — already tax-exclusive, nothing is stripped"
     )
 
 # ─── CALCULATION FUNCTIONS ────────────────────────────────────────────────────
@@ -200,9 +217,34 @@ def calc_ca(p_eur, s_cad):
                 fees=fees, ppu=ppu, roi=roi,
                 tax_note=f"Sell price {s_cad:.2f} CAD → {sell_usd:.2f} USD. All values in USD.")
 
+def calc_us(p_eur, s_usd):
+    # Same maths as the Products Analyzer's calc_us, so the two tools agree:
+    # COGS = (goods + shipping) x (1 + tariff) + labour, all converted at EUR/USD.
+    p_usd    = p_eur * eur_usd
+    ship_usd = us_shipping * eur_usd
+    lab_usd  = us_labor * eur_usd
+    tariff   = (p_usd + ship_usd) * us_tariff
+    cogs     = p_usd + ship_usd + lab_usd + tariff
+    # US prices are tax-exclusive (Amazon collects and remits sales tax), so
+    # unlike UK/AU nothing is stripped from the sell price.
+    ref      = s_usd * ref_us
+    # US digital services fee applies to the referral fee alone — verified
+    # against Seller Snap's Costs tab (3.001% of referral across 116 rows).
+    dsf      = ref * dsf_rate
+    fees     = ref + fba_us + dsf
+    ppu      = s_usd - cogs - fees
+    roi      = ppu / cogs if cogs > 0 else 0
+    return dict(cur="USD", purchase=p_usd, ship_labor=ship_usd + lab_usd,
+                tariff_gst=tariff,
+                cogs=cogs, sell_ex=s_usd, ref=ref, fba=fba_us, dsf=dsf,
+                fees=fees, ppu=ppu, roi=roi,
+                tax_note=f"Import tariff {us_tariff:.0%} in COGS. No sales tax stripped "
+                         f"(Amazon remits it). DSF on referral only.")
+
 uk = calc_uk(purchase_eur, sell_gbp)
 au = calc_au(purchase_eur, sell_aud)
 ca = calc_ca(purchase_eur, sell_cad)
+us = calc_us(purchase_eur, sell_usd_in)
 
 # ─── RESULTS ──────────────────────────────────────────────────────────────────
 
@@ -263,10 +305,12 @@ def render_market(title, d, has_sell):
             else:
                 st.write(f"{label}: {val:.2f}")
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 with col1:
     render_market("🇬🇧  United Kingdom", uk, sell_gbp > 0)
 with col2:
     render_market("🇦🇺  Australia",      au, sell_aud > 0)
 with col3:
     render_market("🇨🇦  Canada",         ca, sell_cad > 0)
+with col4:
+    render_market("🇺🇸  United States",  us, sell_usd_in > 0)
