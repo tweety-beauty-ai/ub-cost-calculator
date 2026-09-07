@@ -13,7 +13,11 @@ st.caption("UK · AU · CA — side by side")
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 
 DEFAULTS = {
-    "eur_gbp": 0.867, "eur_aud": 1.634, "eur_usd": 1.170, "usd_cad": 1.369,
+    # Fallback rates only — with auto_rates on (the default) live ECB rates are
+    # used instead. Refreshed 4 Sep 2026; a stale EUR/USD here was making the
+    # calculator disagree with the Products Analyzer by ~0.5pp on US ROI.
+    "eur_gbp": 0.859, "eur_aud": 1.613, "eur_usd": 1.162, "usd_cad": 1.380,
+    "auto_rates": True,
     "dsf":     3.0,
     # Current per-unit costs (updated 11 Aug 2026: labour 2.35 on every market,
     # UK shipping 0.80, CA shipping 3.12). These literals matter — Streamlit
@@ -71,15 +75,29 @@ with st.sidebar:
 
     with st.expander("Exchange Rates", expanded=True):
         live = fetch_live_rates()
+        auto_rates = st.checkbox(
+            "Auto-use live ECB rates", value=cfg.get("auto_rates", True), key="auto_rates",
+            help="On: every calculation uses the current ECB rate, so this app cannot "
+                 "drift away from the Products Analyzer. Off: the manual values below are used.")
         if live:
-            st.caption(f"Live rates available (ECB, {live['date']})")
-            if st.button("🔄 Use live rates", use_container_width=True):
-                save_config_from_dict({k: live[k] for k in ["eur_gbp", "eur_aud", "eur_usd", "usd_cad"]})
-                st.rerun()
+            st.caption(f"Live ECB ({live['date']}): GBP {live['eur_gbp']} · AUD {live['eur_aud']} · "
+                       f"USD {live['eur_usd']} · CAD/USD {live['usd_cad']}")
+        else:
+            st.caption("⚠️ Live rates unavailable — the manual values below are used.")
         eur_gbp = st.number_input("EUR → GBP", value=cfg["eur_gbp"], step=0.001, format="%.4f", key="eur_gbp")
         eur_aud = st.number_input("EUR → AUD", value=cfg["eur_aud"], step=0.001, format="%.4f", key="eur_aud")
         eur_usd = st.number_input("EUR → USD", value=cfg["eur_usd"], step=0.001, format="%.4f", key="eur_usd")
         usd_cad = st.number_input("USD → CAD", value=cfg["usd_cad"], step=0.001, format="%.4f", key="usd_cad")
+
+        # Live rates win when auto is on — the manual boxes above stay visible so
+        # you can see (and, with auto off, set) what would be used instead.
+        if auto_rates and live:
+            eur_gbp, eur_aud, eur_usd, usd_cad = (live["eur_gbp"], live["eur_aud"],
+                                                  live["eur_usd"], live["usd_cad"])
+            rates_source = f"live ECB {live['date']}"
+        else:
+            rates_source = "manual values"
+        st.caption(f"**In use: {rates_source}**")
     dsf_rate = st.number_input("Digital Svc Fee (%)", value=cfg["dsf"], step=0.5, format="%.1f", key="dsf") / 100
 
     st.markdown("---")
@@ -250,6 +268,7 @@ us = calc_us(purchase_eur, sell_usd_in)
 
 st.divider()
 st.subheader("Results")
+st.caption(f"Rates in use: {rates_source}")
 
 def roi_icon(roi):
     if roi >= 0.20: return "🟢"
