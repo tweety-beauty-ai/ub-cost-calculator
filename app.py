@@ -66,6 +66,82 @@ def fetch_live_rates():
     except Exception:
         return None
 
+# ─── LIVE PER-EAN COSTS (COGS Shipping Calculator sheet) ──────────────────────
+# Same source and service account as the Products Analyzer, so entering an EAN
+# here gives exactly the numbers that tool uses: real freight per unit instead
+# of the flat market average, plus the actual customs clearance cost.
+
+COST_SHEET_ID = "15-xKszQNrnbsfEf_zqMkjtac7SUuo8-hmD-J1SW4azs"
+MARKET_ALIASES = {"USA": "US", "US": "US", "CA": "CA", "UK": "UK", "AU": "AU", "WM": "WM"}
+
+
+def _sheet_creds():
+    """Service-account JSON from Streamlit secrets, or a local file."""
+    try:
+        if "gcp_service_account" in st.secrets:
+            return dict(st.secrets["gcp_service_account"])
+    except Exception:
+        pass
+    local = os.path.expanduser("~/.config/mto-analyzer-sa.json")
+    if os.path.exists(local):
+        with open(local) as f:
+            return json.load(f)
+    return None
+
+
+@st.cache_data(ttl=21600, show_spinner=False)      # 6h; the sheet updates daily
+def load_cost_tables():
+    """({(ean,market): freight_eur}, {(ean,market): customs_eur}, source)."""
+    creds_info = _sheet_creds()
+    if not creds_info:
+        return {}, {}, "not connected — sidebar values used"
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        creds = service_account.Credentials.from_service_account_info(
+            creds_info, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+        svc = build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+        def grab(tab):
+            rows = svc.spreadsheets().values().get(
+                spreadsheetId=COST_SHEET_ID, range=f"{tab}!A2:D").execute().get("values", [])
+            out = {}
+            for r in rows:
+                if len(r) < 4:
+                    continue
+                ean = "".join(ch for ch in str(r[0]) if ch.isdigit())
+                market = MARKET_ALIASES.get(str(r[1]).strip().upper())
+                try:
+                    cost = float(str(r[3]).replace(",", "."))
+                except ValueError:
+                    continue
+                if ean and market and cost >= 0:
+                    out[(ean.zfill(13) if 8 < len(ean) < 13 else ean, market)] = cost
+            return out
+
+        freight, customs = grab("Output"), grab("Output_Customs")
+        return freight, customs, f"live sheet ({len(freight)} freight / {len(customs)} customs rows)"
+    except Exception as e:
+        return {}, {}, f"unavailable ({type(e).__name__}) — sidebar values used"
+
+
+def lookup_costs(ean, market):
+    """(freight_eur|None, customs_eur, note) for one product+market."""
+    freight, customs, _ = load_cost_tables()
+    if not ean:
+        return None, 0.0, ""
+    key = (ean.zfill(13) if 8 < len(ean) < 13 else ean, market)
+    f, c = freight.get(key), customs.get(key, 0.0)
+    if f is None and not c:
+        return None, 0.0, "not in the cost sheet — flat sidebar values used"
+    bits = []
+    if f is not None:
+        bits.append(f"freight {f:.2f}")
+    if c:
+        bits.append(f"customs {c:.2f}")
+    return f, c, "real " + " + ".join(bits) + " EUR/unit"
+
+
 cfg = load_config()
 
 # ─── SIDEBAR: Parameters ──────────────────────────────────────────────────────
@@ -144,6 +220,16 @@ with st.sidebar:
 # ─── PRODUCT INPUT ────────────────────────────────────────────────────────────
 
 st.subheader("COGS and ROI per market")
+
+_f, _c, _cost_src = load_cost_tables()
+ean_in = st.text_input(
+    "EAN (optional)", value="", max_chars=14,
+    help="Enter the EAN to use this product's real per-unit freight and customs "
+         "from the COGS Shipping Calculator sheet instead of the flat sidebar "
+         "values — the same figures the Products Analyzer uses.")
+ean_in = "".join(ch for ch in ean_in if ch.isdigit())
+st.caption(f"Cost sheet: {_cost_src}")
+
 c1, c2, c3, c4, c5 = st.columns([1.2, 1, 1, 1, 1])
 
 with c1:
@@ -179,8 +265,10 @@ with c5:
 # ─── CALCULATION FUNCTIONS ────────────────────────────────────────────────────
 
 def calc_uk(p_eur, s_gbp):
+    ship_real, customs_eur, cost_note = lookup_costs(ean_in, "UK")
+    uk_shipping_eff = ship_real if ship_real is not None else uk_shipping
     p    = p_eur * eur_gbp
-    sl   = (uk_shipping + uk_labor) * eur_gbp
+    sl   = (uk_shipping_eff + uk_labor + customs_eur) * eur_gbp
     cogs = p + sl
     s    = s_gbp / (1 + uk_vat)
     ref  = s * ref_uk
@@ -195,11 +283,14 @@ def calc_uk(p_eur, s_gbp):
     return dict(cur="GBP", purchase=p, ship_labor=sl, tariff_gst=None,
                 cogs=cogs, sell_ex=s, ref=ref, fba=fba_gbp, dsf=dsf,
                 fees=fees, ppu=ppu, roi=roi,
-                tax_note=f"VAT {uk_vat:.0%} stripped from sell price")
+                tax_note=(f"VAT {uk_vat:.0%} stripped from sell price"
+                          + (f" · {cost_note}" if cost_note else "")))
 
 def calc_au(p_eur, s_aud):
+    ship_real, customs_eur, cost_note = lookup_costs(ean_in, "AU")
+    au_shipping_eff = ship_real if ship_real is not None else au_shipping
     p        = p_eur * eur_aud
-    ship_aud = au_shipping * eur_aud
+    ship_aud = (au_shipping_eff + customs_eur) * eur_aud
     lab_aud  = au_labor * eur_aud
     tariff   = (p + ship_aud) * au_tariff
     # Import GST is NOT in COGS — it is reclaimable as input tax credit
@@ -214,13 +305,17 @@ def calc_au(p_eur, s_aud):
                 tariff_gst=tariff,
                 cogs=cogs, sell_ex=s, ref=ref, fba=fba_aud, dsf=dsf,
                 fees=fees, ppu=ppu, roi=roi,
-                tax_note=f"Import tariff {au_tariff:.0%} in COGS; GST {au_gst:.0%} stripped from sell price only")
+                tax_note=(f"Import tariff {au_tariff:.0%} in COGS; GST {au_gst:.0%} "
+                          f"stripped from sell price only"
+                          + (f" · {cost_note}" if cost_note else "")))
 
 def calc_ca(p_eur, s_cad):
+    ship_real, customs_eur, cost_note = lookup_costs(ean_in, "CA")
+    ca_shipping_eff = ship_real if ship_real is not None else ca_shipping
     # Everything in USD
     cad_usd  = 1 / usd_cad
     p_usd    = p_eur * eur_usd
-    ship_usd = ca_shipping * eur_usd
+    ship_usd = (ca_shipping_eff + customs_eur) * eur_usd
     lab_usd  = ca_labor * eur_usd
     cogs     = p_usd + ship_usd + lab_usd
     sell_usd = s_cad * cad_usd
@@ -233,14 +328,17 @@ def calc_ca(p_eur, s_cad):
     return dict(cur="USD", purchase=p_usd, ship_labor=ship_usd + lab_usd, tariff_gst=None,
                 cogs=cogs, cogs_cad=cogs * usd_cad, sell_ex=sell_usd, ref=ref, fba=fba_usd, dsf=dsf,
                 fees=fees, ppu=ppu, roi=roi,
-                tax_note=f"Sell price {s_cad:.2f} CAD → {sell_usd:.2f} USD. All values in USD.")
+                tax_note=(f"Sell price {s_cad:.2f} CAD → {sell_usd:.2f} USD. All values in USD."
+                          + (f" · {cost_note}" if cost_note else "")))
 
 def calc_us(p_eur, s_usd):
+    ship_real, customs_eur, cost_note = lookup_costs(ean_in, "US")
+    us_shipping_eff = ship_real if ship_real is not None else us_shipping
     # Same maths as the Products Analyzer's calc_us, so the two tools agree:
     # COGS = (goods + shipping) x (1 + tariff) + labour, all converted at EUR/USD.
     p_usd    = p_eur * eur_usd
-    ship_usd = us_shipping * eur_usd
-    lab_usd  = us_labor * eur_usd
+    ship_usd = us_shipping_eff * eur_usd
+    lab_usd  = (us_labor + customs_eur) * eur_usd     # customs clearance is not dutiable
     tariff   = (p_usd + ship_usd) * us_tariff
     cogs     = p_usd + ship_usd + lab_usd + tariff
     # US prices are tax-exclusive (Amazon collects and remits sales tax), so
@@ -256,8 +354,9 @@ def calc_us(p_eur, s_usd):
                 tariff_gst=tariff,
                 cogs=cogs, sell_ex=s_usd, ref=ref, fba=fba_us, dsf=dsf,
                 fees=fees, ppu=ppu, roi=roi,
-                tax_note=f"Import tariff {us_tariff:.0%} in COGS. No sales tax stripped "
-                         f"(Amazon remits it). DSF on referral only.")
+                tax_note=(f"Import tariff {us_tariff:.0%} in COGS. No sales tax stripped "
+                          f"(Amazon remits it). DSF on referral only."
+                          + (f" · {cost_note}" if cost_note else "")))
 
 uk = calc_uk(purchase_eur, sell_gbp)
 au = calc_au(purchase_eur, sell_aud)
