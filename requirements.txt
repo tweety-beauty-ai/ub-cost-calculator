@@ -1,2 +1,5 @@
 streamlit>=1.32.0
 requests>=2.28.0
+# needed for the EAN cost lookup (COGS Shipping Calculator sheet)
+google-auth>=2.28,<3
+google-api-python-client>=2.120,<3
