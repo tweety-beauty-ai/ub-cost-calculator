@@ -1,12 +1,13 @@
 import json
 import os
+import re
 import requests
 import streamlit as st
 
 st.set_page_config(page_title="UB Cost Calculator", page_icon="🐱", layout="wide",
                    initial_sidebar_state="expanded")
 st.title("UB Cost Calculator")
-st.caption("UK · AU · CA — side by side")
+st.caption("UK · AU · CA · US — side by side")
 
 # ─── CONFIG: Load / Save ──────────────────────────────────────────────────────
 
@@ -14,9 +15,9 @@ CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 
 DEFAULTS = {
     # Fallback rates only — with auto_rates on (the default) live ECB rates are
-    # used instead. Refreshed 4 Sep 2026; a stale EUR/USD here was making the
-    # calculator disagree with the Products Analyzer by ~0.5pp on US ROI.
-    "eur_gbp": 0.859, "eur_aud": 1.613, "eur_usd": 1.162, "usd_cad": 1.380,
+    # used instead. Refreshed 12 Oct 2026 (ECB 9 Oct); a stale EUR/USD here was
+    # making the calculator disagree with the Products Analyzer by ~0.5pp on US ROI.
+    "eur_gbp": 0.8476, "eur_aud": 1.6052, "eur_usd": 1.1206, "usd_cad": 1.4226,
     "auto_rates": True,
     "dsf":     3.0,
     # Current per-unit costs (updated 11 Aug 2026: labour 2.35 on every market,
@@ -47,24 +48,46 @@ def save_config_from_dict(updates):
     with open(CONFIG_FILE, "w") as f:
         json.dump(current, f, indent=2)
 
-@st.cache_data(ttl=3600)
+RATES_URLS = (
+    # frankfurter.app now 301-redirects to frankfurter.dev — call the new host
+    # first and keep the old one as a second try.
+    "https://api.frankfurter.dev/v1/latest?base=EUR&symbols=GBP,AUD,USD,CAD",
+    "https://api.frankfurter.app/latest?from=EUR&to=GBP,AUD,USD,CAD",
+)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_live_rates_cached():
+    # Raises on failure ON PURPOSE: st.cache_data does not cache exceptions, so
+    # a failed fetch is retried on the next rerun. It used to return None, which
+    # WAS cached — one bad fetch after the app woke up pinned the fallback
+    # rates for a full hour, and each rerun in that hour re-cached the failure.
+    errors = []
+    for url in RATES_URLS:
+        for _ in range(2):
+            try:
+                r = requests.get(url, timeout=10)
+                r.raise_for_status()
+                data = r.json()
+                rates = data["rates"]
+                return {
+                    "eur_gbp": round(rates["GBP"], 4),
+                    "eur_aud": round(rates["AUD"], 4),
+                    "eur_usd": round(rates["USD"], 4),
+                    "usd_cad": round(rates["CAD"] / rates["USD"], 4),
+                    "date": data.get("date", "unknown"),
+                }
+            except Exception as e:
+                errors.append(f"{url.split('/')[2]}: {type(e).__name__}")
+    raise RuntimeError("; ".join(errors))
+
+
 def fetch_live_rates():
+    """(rates|None, error_text). Failures are never cached."""
     try:
-        r = requests.get(
-            "https://api.frankfurter.app/latest?from=EUR&to=GBP,AUD,USD,CAD",
-            timeout=5,
-        )
-        data = r.json()
-        rates = data["rates"]
-        return {
-            "eur_gbp": round(rates["GBP"], 4),
-            "eur_aud": round(rates["AUD"], 4),
-            "eur_usd": round(rates["USD"], 4),
-            "usd_cad": round(rates["CAD"] / rates["USD"], 4),
-            "date": data.get("date", "unknown"),
-        }
-    except Exception:
-        return None
+        return _fetch_live_rates_cached(), ""
+    except Exception as e:
+        return None, str(e)
 
 # ─── LIVE PER-EAN COSTS (COGS Shipping Calculator sheet) ──────────────────────
 # Same source and service account as the Products Analyzer, so entering an EAN
@@ -90,37 +113,44 @@ def _sheet_creds():
 
 
 @st.cache_data(ttl=21600, show_spinner=False)      # 6h; the sheet updates daily
-def load_cost_tables():
-    """({(ean,market): freight_eur}, {(ean,market): customs_eur}, source)."""
+def _load_cost_tables_cached():
+    # Raises on failure (not cached) so one bad read can't stick for 6 hours.
     creds_info = _sheet_creds()
     if not creds_info:
-        return {}, {}, "not connected — sidebar values used"
+        raise LookupError("not connected")
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    creds = service_account.Credentials.from_service_account_info(
+        creds_info, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+    svc = build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+    def grab(tab):
+        rows = svc.spreadsheets().values().get(
+            spreadsheetId=COST_SHEET_ID, range=f"{tab}!A2:D").execute().get("values", [])
+        out = {}
+        for r in rows:
+            if len(r) < 4:
+                continue
+            ean = "".join(ch for ch in str(r[0]) if ch.isdigit())
+            market = MARKET_ALIASES.get(str(r[1]).strip().upper())
+            try:
+                cost = float(str(r[3]).replace(",", "."))
+            except ValueError:
+                continue
+            if ean and market and cost >= 0:
+                out[(ean.zfill(13) if 8 < len(ean) < 13 else ean, market)] = cost
+        return out
+
+    freight, customs = grab("Output"), grab("Output_Customs")
+    return freight, customs, f"live sheet ({len(freight)} freight / {len(customs)} customs rows)"
+
+
+def load_cost_tables():
+    """({(ean,market): freight_eur}, {(ean,market): customs_eur}, source)."""
     try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-        creds = service_account.Credentials.from_service_account_info(
-            creds_info, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
-        svc = build("sheets", "v4", credentials=creds, cache_discovery=False)
-
-        def grab(tab):
-            rows = svc.spreadsheets().values().get(
-                spreadsheetId=COST_SHEET_ID, range=f"{tab}!A2:D").execute().get("values", [])
-            out = {}
-            for r in rows:
-                if len(r) < 4:
-                    continue
-                ean = "".join(ch for ch in str(r[0]) if ch.isdigit())
-                market = MARKET_ALIASES.get(str(r[1]).strip().upper())
-                try:
-                    cost = float(str(r[3]).replace(",", "."))
-                except ValueError:
-                    continue
-                if ean and market and cost >= 0:
-                    out[(ean.zfill(13) if 8 < len(ean) < 13 else ean, market)] = cost
-            return out
-
-        freight, customs = grab("Output"), grab("Output_Customs")
-        return freight, customs, f"live sheet ({len(freight)} freight / {len(customs)} customs rows)"
+        return _load_cost_tables_cached()
+    except LookupError:
+        return {}, {}, "not connected — sidebar values used"
     except Exception as e:
         return {}, {}, f"unavailable ({type(e).__name__}) — sidebar values used"
 
@@ -142,6 +172,124 @@ def lookup_costs(ean, market):
     return f, c, "real " + " + ".join(bits) + " EUR/unit"
 
 
+# ─── PER-EAN FBA FEE (SellerSnap sheet → Keepa → flat sidebar) ────────────────
+# A flat FBA fee per market is wrong for most products: SellerSnap's real
+# per-SKU fee runs e.g. US $5.20–7.22, CA 5.29–9.72 CAD, UK £1.86–3.20,
+# AU 6.78–9.81 AUD (Masha, Oct 2026). With an EAN we use the product's own fee.
+#
+# The "SellerSnap FBA fees" sheet has one tab per market (US/CA/UK/AU) holding a
+# raw SellerSnap listings export pasted as-is. Columns are found by header
+# (sku, fulfillment_cost) and the EAN is the digit run at the end of the SKU
+# (BW1_8410190631182, US_FBA_NEW_BW_8411061725863). To refresh: paste a new
+# export over the tab.
+
+FBA_SHEET_ID = "1hiIkVYdcHzm_M9QUR_asdK_0vNoatrneAYEQU4KCiBs"
+FBA_MARKETS = ("US", "CA", "UK", "AU")
+KEEPA_DOMAINS = {"US": 1, "UK": 2, "CA": 6}        # Keepa has no AU marketplace
+
+
+def _norm_ean(ean):
+    return ean.zfill(13) if 8 < len(ean) < 13 else ean
+
+
+def _parse_ss_export(rows, market, out):
+    """Add {(ean, market): fee} from one pasted SellerSnap export; returns row count."""
+    if not rows:
+        return 0
+    head = [str(h).strip().lower() for h in rows[0]]
+    if "sku" not in head or "fulfillment_cost" not in head:
+        return -1
+    i_sku, i_fee = head.index("sku"), head.index("fulfillment_cost")
+    n = 0
+    for r in rows[1:]:
+        if len(r) <= max(i_sku, i_fee):
+            continue
+        m = re.search(r"(\d{8,14})$", str(r[i_sku]).strip())
+        try:
+            fee = float(str(r[i_fee]).replace(",", "."))
+        except ValueError:
+            continue
+        if not m or fee <= 0:
+            continue
+        key = (_norm_ean(m.group(1)), market)
+        # Several SKUs can share an EAN; keep the higher fee (conservative).
+        out[key] = max(fee, out.get(key, 0.0))
+        n += 1
+    return n
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _load_fba_table_cached():
+    # Raises on failure so a failed read is retried next rerun, not cached 6h.
+    creds_info = _sheet_creds()
+    if not creds_info:
+        raise RuntimeError("not connected")
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    creds = service_account.Credentials.from_service_account_info(
+        creds_info, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+    svc = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    resp = svc.spreadsheets().values().batchGet(
+        spreadsheetId=FBA_SHEET_ID,
+        ranges=[f"{m}!A1:CZ" for m in FBA_MARKETS]).execute()
+    out, counts = {}, []
+    for market, vr in zip(FBA_MARKETS, resp.get("valueRanges", [])):
+        n = _parse_ss_export(vr.get("values", []), market, out)
+        counts.append(f"{market} {n if n >= 0 else '? (no sku/fulfillment_cost header)'}")
+    return out, "SellerSnap sheet (" + " · ".join(counts) + ")"
+
+
+def load_fba_table():
+    """({(ean, market): fee in marketplace currency}, status text)."""
+    try:
+        return _load_fba_table_cached()
+    except Exception as e:
+        return {}, f"SellerSnap sheet unavailable ({type(e).__name__})"
+
+
+def _keepa_key():
+    try:
+        if st.secrets.get("keepa_key"):
+            return st.secrets["keepa_key"]
+    except Exception:
+        pass
+    return os.environ.get("KEEPA_KEY", "")
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _keepa_fba_cached(ean, domain, key):
+    # Raises on network/API errors so those are retried, not cached; a clean
+    # "Keepa has no fee for this product" (None) IS cached for 6h.
+    r = requests.get("https://api.keepa.com/product",
+                     params={"key": key, "domain": domain, "code": ean, "history": 0},
+                     timeout=30)
+    r.raise_for_status()
+    for p in r.json().get("products") or []:
+        fee = (p.get("fbaFees") or {}).get("pickAndPackFee")
+        if fee and fee > 0:
+            return fee / 100
+    return None
+
+
+def lookup_fba(ean, market):
+    """(fee in marketplace currency | None, source text)."""
+    if not ean:
+        return None, ""
+    table, _ = load_fba_table()
+    fee = table.get((_norm_ean(ean), market))
+    if fee is not None:
+        return fee, "SellerSnap"
+    domain, key = KEEPA_DOMAINS.get(market), _keepa_key()
+    if domain and key:
+        try:
+            fee = _keepa_fba_cached(_norm_ean(ean), domain, key)
+        except Exception as e:
+            return None, f"Keepa error {type(e).__name__}"
+        if fee is not None:
+            return fee, "Keepa"
+    return None, "flat default"
+
+
 cfg = load_config()
 
 # ─── SIDEBAR: Parameters ──────────────────────────────────────────────────────
@@ -150,7 +298,7 @@ with st.sidebar:
     st.header("Parameters")
 
     with st.expander("Exchange Rates", expanded=True):
-        live = fetch_live_rates()
+        live, rates_err = fetch_live_rates()
         auto_rates = st.checkbox(
             "Auto-use live ECB rates", value=cfg.get("auto_rates", True), key="auto_rates",
             help="On: every calculation uses the current ECB rate, so this app cannot "
@@ -159,7 +307,10 @@ with st.sidebar:
             st.caption(f"Live ECB ({live['date']}): GBP {live['eur_gbp']} · AUD {live['eur_aud']} · "
                        f"USD {live['eur_usd']} · CAD/USD {live['usd_cad']}")
         else:
-            st.caption("⚠️ Live rates unavailable — the manual values below are used.")
+            st.caption(f"⚠️ Live rates unavailable ({rates_err}) — the manual values below are used.")
+            if st.button("Retry live rates"):
+                _fetch_live_rates_cached.clear()
+                st.rerun()
         eur_gbp = st.number_input("EUR → GBP", value=cfg["eur_gbp"], step=0.001, format="%.4f", key="eur_gbp")
         eur_aud = st.number_input("EUR → AUD", value=cfg["eur_aud"], step=0.001, format="%.4f", key="eur_aud")
         eur_usd = st.number_input("EUR → USD", value=cfg["eur_usd"], step=0.001, format="%.4f", key="eur_usd")
@@ -225,10 +376,12 @@ _f, _c, _cost_src = load_cost_tables()
 ean_in = st.text_input(
     "EAN (optional)", value="", max_chars=14,
     help="Enter the EAN to use this product's real per-unit freight and customs "
-         "from the COGS Shipping Calculator sheet instead of the flat sidebar "
-         "values — the same figures the Products Analyzer uses.")
+         "(COGS Shipping Calculator sheet) and its real FBA fee (SellerSnap export, "
+         "else Keepa for US/UK/CA) instead of the flat sidebar values.")
 ean_in = "".join(ch for ch in ean_in if ch.isdigit())
-st.caption(f"Cost sheet: {_cost_src}")
+_fba_tab, _fba_src = load_fba_table()
+st.caption(f"Cost sheet: {_cost_src} · FBA fees: {_fba_src}"
+           f" · Keepa fallback: {'on' if _keepa_key() else 'off (no keepa_key secret)'}")
 
 c1, c2, c3, c4, c5 = st.columns([1.2, 1, 1, 1, 1])
 
@@ -266,28 +419,33 @@ with c5:
 
 def calc_uk(p_eur, s_gbp):
     ship_real, customs_eur, cost_note = lookup_costs(ean_in, "UK")
+    fba_real, fba_src = lookup_fba(ean_in, "UK")
+    fba_gbp_eff = fba_real if fba_real is not None else fba_gbp
     uk_shipping_eff = ship_real if ship_real is not None else uk_shipping
     p    = p_eur * eur_gbp
     sl   = (uk_shipping_eff + uk_labor + customs_eur) * eur_gbp
     cogs = p + sl
     s    = s_gbp / (1 + uk_vat)
     ref  = s * ref_uk
-    dsf  = (ref + fba_gbp) * dsf_rate
+    dsf  = (ref + fba_gbp_eff) * dsf_rate
     # The digital services fee is charged by our country of establishment
     # (Spain = 3%), so it applies on UK exactly as on AU/CA and IS deducted from
     # profit. The original UK spreadsheet showed it without deducting it, which
     # overstated UK ROI by ~1pp.
-    fees = ref + fba_gbp + dsf
+    fees = ref + fba_gbp_eff + dsf
     ppu  = s - cogs - fees
     roi  = ppu / cogs if cogs > 0 else 0
     return dict(cur="GBP", purchase=p, ship_labor=sl, tariff_gst=None,
-                cogs=cogs, sell_ex=s, ref=ref, fba=fba_gbp, dsf=dsf,
+                cogs=cogs, sell_ex=s, ref=ref, fba=fba_gbp_eff, dsf=dsf,
                 fees=fees, ppu=ppu, roi=roi,
                 tax_note=(f"VAT {uk_vat:.0%} stripped from sell price"
-                          + (f" · {cost_note}" if cost_note else "")))
+                          + (f" · {cost_note}" if cost_note else "")
+                          + (f" · FBA {fba_gbp_eff:.2f} GBP ({fba_src})" if fba_src else "")))
 
 def calc_au(p_eur, s_aud):
     ship_real, customs_eur, cost_note = lookup_costs(ean_in, "AU")
+    fba_real, fba_src = lookup_fba(ean_in, "AU")
+    fba_aud_eff = fba_real if fba_real is not None else fba_aud
     au_shipping_eff = ship_real if ship_real is not None else au_shipping
     p        = p_eur * eur_aud
     ship_aud = (au_shipping_eff + customs_eur) * eur_aud
@@ -297,20 +455,23 @@ def calc_au(p_eur, s_aud):
     cogs     = p + ship_aud + lab_aud + tariff
     s        = s_aud / (1 + au_gst)
     ref      = s * ref_au
-    dsf      = (ref + fba_aud) * dsf_rate
-    fees     = ref + fba_aud + dsf
+    dsf      = (ref + fba_aud_eff) * dsf_rate
+    fees     = ref + fba_aud_eff + dsf
     ppu      = s - cogs - fees
     roi      = ppu / cogs if cogs > 0 else 0
     return dict(cur="AUD", purchase=p, ship_labor=ship_aud + lab_aud,
                 tariff_gst=tariff,
-                cogs=cogs, sell_ex=s, ref=ref, fba=fba_aud, dsf=dsf,
+                cogs=cogs, sell_ex=s, ref=ref, fba=fba_aud_eff, dsf=dsf,
                 fees=fees, ppu=ppu, roi=roi,
                 tax_note=(f"Import tariff {au_tariff:.0%} in COGS; GST {au_gst:.0%} "
                           f"stripped from sell price only"
-                          + (f" · {cost_note}" if cost_note else "")))
+                          + (f" · {cost_note}" if cost_note else "")
+                          + (f" · FBA {fba_aud_eff:.2f} AUD ({fba_src})" if fba_src else "")))
 
 def calc_ca(p_eur, s_cad):
     ship_real, customs_eur, cost_note = lookup_costs(ean_in, "CA")
+    fba_real, fba_src = lookup_fba(ean_in, "CA")
+    fba_cad_eff = fba_real if fba_real is not None else fba_cad
     ca_shipping_eff = ship_real if ship_real is not None else ca_shipping
     # Everything in USD
     cad_usd  = 1 / usd_cad
@@ -319,7 +480,7 @@ def calc_ca(p_eur, s_cad):
     lab_usd  = ca_labor * eur_usd
     cogs     = p_usd + ship_usd + lab_usd
     sell_usd = s_cad * cad_usd
-    fba_usd  = fba_cad * cad_usd
+    fba_usd  = fba_cad_eff * cad_usd
     ref      = sell_usd * ref_ca
     dsf      = (ref + fba_usd) * dsf_rate
     fees     = ref + fba_usd + dsf
@@ -329,10 +490,13 @@ def calc_ca(p_eur, s_cad):
                 cogs=cogs, cogs_cad=cogs * usd_cad, sell_ex=sell_usd, ref=ref, fba=fba_usd, dsf=dsf,
                 fees=fees, ppu=ppu, roi=roi,
                 tax_note=(f"Sell price {s_cad:.2f} CAD → {sell_usd:.2f} USD. All values in USD."
-                          + (f" · {cost_note}" if cost_note else "")))
+                          + (f" · {cost_note}" if cost_note else "")
+                          + (f" · FBA {fba_cad_eff:.2f} CAD ({fba_src})" if fba_src else "")))
 
 def calc_us(p_eur, s_usd):
     ship_real, customs_eur, cost_note = lookup_costs(ean_in, "US")
+    fba_real, fba_src = lookup_fba(ean_in, "US")
+    fba_us_eff = fba_real if fba_real is not None else fba_us
     us_shipping_eff = ship_real if ship_real is not None else us_shipping
     # Same maths as the Products Analyzer's calc_us, so the two tools agree:
     # COGS = (goods + shipping) x (1 + tariff) + labour, all converted at EUR/USD.
@@ -347,16 +511,17 @@ def calc_us(p_eur, s_usd):
     # US digital services fee applies to the referral fee alone — verified
     # against Seller Snap's Costs tab (3.001% of referral across 116 rows).
     dsf      = ref * dsf_rate
-    fees     = ref + fba_us + dsf
+    fees     = ref + fba_us_eff + dsf
     ppu      = s_usd - cogs - fees
     roi      = ppu / cogs if cogs > 0 else 0
     return dict(cur="USD", purchase=p_usd, ship_labor=ship_usd + lab_usd,
                 tariff_gst=tariff,
-                cogs=cogs, sell_ex=s_usd, ref=ref, fba=fba_us, dsf=dsf,
+                cogs=cogs, sell_ex=s_usd, ref=ref, fba=fba_us_eff, dsf=dsf,
                 fees=fees, ppu=ppu, roi=roi,
                 tax_note=(f"Import tariff {us_tariff:.0%} in COGS. No sales tax stripped "
                           f"(Amazon remits it). DSF on referral only."
-                          + (f" · {cost_note}" if cost_note else "")))
+                          + (f" · {cost_note}" if cost_note else "")
+                          + (f" · FBA {fba_us_eff:.2f} USD ({fba_src})" if fba_src else "")))
 
 uk = calc_uk(purchase_eur, sell_gbp)
 au = calc_au(purchase_eur, sell_aud)
