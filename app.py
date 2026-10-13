@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 import requests
@@ -388,8 +389,14 @@ c1, c2, c3, c4, c5 = st.columns([1.2, 1, 1, 1, 1])
 with c1:
     purchase_eur = st.number_input(
         "Purchase price (EUR, excl VAT)",
-        min_value=0.0, value=0.00, step=0.50, format="%.2f"
+        min_value=0.0, value=0.00, step=0.50, format="%.2f",
+        help="Leave at 0 to see only the max buy price per market"
     )
+    target_roi = st.number_input(
+        "Target ROI (%)", min_value=-50.0, value=17.0, step=1.0, format="%.1f",
+        help="Used for the max buy price: the highest purchase price (EUR, excl VAT) "
+             "that still gives this ROI at the sell price entered"
+    ) / 100
 with c2:
     sell_gbp = st.number_input(
         "Sell UK (GBP, inc VAT)",
@@ -528,6 +535,31 @@ au = calc_au(purchase_eur, sell_aud)
 ca = calc_ca(purchase_eur, sell_cad)
 us = calc_us(purchase_eur, sell_usd_in)
 
+
+def max_buy_price(calc, sell, roi_target):
+    """Highest purchase price (EUR, excl VAT) that still gives roi_target.
+
+    Solved from the market's own calc function, so it can never drift from the
+    ROI maths. In every market the fees (referral, FBA, DSF) depend only on the
+    sell price, and COGS is linear in the purchase price: COGS = a*p + b. ROI =
+    (sell - fees - COGS) / COGS, so the max COGS is (sell - fees) / (1 + ROI)
+    and p = (max COGS - b) / a. Floored to the cent so buying at the shown
+    price meets the target. None = target unreachable even at a zero price.
+    """
+    d0, d1 = calc(0.0, sell), calc(1.0, sell)
+    a, b = d1["cogs"] - d0["cogs"], d0["cogs"]
+    cogs_max = (d0["sell_ex"] - d0["fees"]) / (1 + roi_target)
+    p = (cogs_max - b) / a
+    return math.floor(p * 100) / 100 if p > 0 else None
+
+
+mbp = {
+    "UK": max_buy_price(calc_uk, sell_gbp,    target_roi),
+    "AU": max_buy_price(calc_au, sell_aud,    target_roi),
+    "CA": max_buy_price(calc_ca, sell_cad,    target_roi),
+    "US": max_buy_price(calc_us, sell_usd_in, target_roi),
+}
+
 # ─── RESULTS ──────────────────────────────────────────────────────────────────
 
 st.divider()
@@ -540,10 +572,18 @@ def roi_icon(roi):
     if roi >  0:    return "🟠"
     return "🔴"
 
-def render_market(title, d, has_sell):
+def render_market(title, d, has_sell, mbp_eur):
     st.markdown(f"**{title}**")
     if not has_sell:
         st.caption("Enter a sell price above")
+        return
+    st.metric(f"Max buy price @ {target_roi:.0%} ROI (EUR excl VAT)",
+              f"{mbp_eur:.2f}" if mbp_eur is not None else "—")
+    if mbp_eur is None:
+        st.caption("Target ROI not reachable at this sell price, even at a zero purchase price.")
+    if purchase_eur <= 0:
+        st.caption(d["tax_note"])
+        st.caption("Enter a purchase price above to see ROI and profit.")
         return
     c    = d["cur"]
     roi  = d["roi"]
@@ -590,10 +630,10 @@ def render_market(title, d, has_sell):
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    render_market("🇬🇧  United Kingdom", uk, sell_gbp > 0)
+    render_market("🇬🇧  United Kingdom", uk, sell_gbp > 0,    mbp["UK"])
 with col2:
-    render_market("🇦🇺  Australia",      au, sell_aud > 0)
+    render_market("🇦🇺  Australia",      au, sell_aud > 0,    mbp["AU"])
 with col3:
-    render_market("🇨🇦  Canada",         ca, sell_cad > 0)
+    render_market("🇨🇦  Canada",         ca, sell_cad > 0,    mbp["CA"])
 with col4:
-    render_market("🇺🇸  United States",  us, sell_usd_in > 0)
+    render_market("🇺🇸  United States",  us, sell_usd_in > 0, mbp["US"])
