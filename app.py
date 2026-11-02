@@ -437,8 +437,13 @@ with c1:
         min_value=0.0, value=0.00, step=0.50, format="%.2f",
         help="Leave at 0 to see only the max buy price per market"
     )
-    target_roi = st.number_input(
+    use_minimums = st.checkbox(
+        "Target ROI = UB minimum per market", value=True,
+        help="UK 15% · CA 20% · US 17% (UB minimums, Nov 2026). AU and China have no "
+             "separate minimum yet and use 17%. Untick to use one target for every market.")
+    target_roi_flat = st.number_input(
         "Target ROI (%)", min_value=-50.0, value=17.0, step=1.0, format="%.1f",
+        disabled=use_minimums,
         help="Used for the max buy price: the highest purchase price (EUR, excl VAT) "
              "that still gives this ROI at the sell price entered"
     ) / 100
@@ -466,6 +471,14 @@ with c5:
         min_value=0.0, value=0.0, step=1.0, format="%.2f",
         help="Amazon US listing price — already tax-exclusive, nothing is stripped"
     )
+
+# UB minimum ROI per market (Victoria, 2 Nov 2026) — same values as the MTO
+# Analyzer's core.ROI_THRESHOLDS. AU and CN have no separate minimum yet (17%).
+ROI_MINIMUMS = {"UK": 0.15, "CA": 0.20, "US": 0.17, "AU": 0.17, "CN": 0.17}
+
+
+def target_roi(market):
+    return ROI_MINIMUMS[market] if use_minimums else target_roi_flat
 
 # ─── CALCULATION FUNCTIONS ────────────────────────────────────────────────────
 
@@ -599,10 +612,10 @@ def max_buy_price(calc, sell, roi_target):
 
 
 mbp = {
-    "UK": max_buy_price(calc_uk, sell_gbp,    target_roi),
-    "AU": max_buy_price(calc_au, sell_aud,    target_roi),
-    "CA": max_buy_price(calc_ca, sell_cad,    target_roi),
-    "US": max_buy_price(calc_us, sell_usd_in, target_roi),
+    "UK": max_buy_price(calc_uk, sell_gbp,    target_roi("UK")),
+    "AU": max_buy_price(calc_au, sell_aud,    target_roi("AU")),
+    "CA": max_buy_price(calc_ca, sell_cad,    target_roi("CA")),
+    "US": max_buy_price(calc_us, sell_usd_in, target_roi("US")),
 }
 
 # ─── RESULTS ──────────────────────────────────────────────────────────────────
@@ -617,12 +630,12 @@ def roi_icon(roi):
     if roi >  0:    return "🟠"
     return "🔴"
 
-def render_market(title, d, has_sell, mbp_eur):
+def render_market(title, d, has_sell, mbp_eur, market):
     st.markdown(f"**{title}**")
     if not has_sell:
         st.caption("Enter a sell price above")
         return
-    st.metric(f"Max buy price @ {target_roi:.0%} ROI (EUR excl VAT)",
+    st.metric(f"Max buy price @ {target_roi(market):.0%} ROI (EUR excl VAT)",
               f"{mbp_eur:.2f}" if mbp_eur is not None else "—")
     if mbp_eur is None:
         st.caption("Target ROI not reachable at this sell price, even at a zero purchase price.")
@@ -675,13 +688,13 @@ def render_market(title, d, has_sell, mbp_eur):
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    render_market("🇬🇧  United Kingdom", uk, sell_gbp > 0,    mbp["UK"])
+    render_market("🇬🇧  United Kingdom", uk, sell_gbp > 0,    mbp["UK"], "UK")
 with col2:
-    render_market("🇦🇺  Australia",      au, sell_aud > 0,    mbp["AU"])
+    render_market("🇦🇺  Australia",      au, sell_aud > 0,    mbp["AU"], "AU")
 with col3:
-    render_market("🇨🇦  Canada",         ca, sell_cad > 0,    mbp["CA"])
+    render_market("🇨🇦  Canada",         ca, sell_cad > 0,    mbp["CA"], "CA")
 with col4:
-    render_market("🇺🇸  United States",  us, sell_usd_in > 0, mbp["US"])
+    render_market("🇺🇸  United States",  us, sell_usd_in > 0, mbp["US"], "US")
 
 # ─── CHINA (TMALL GLOBAL) ─────────────────────────────────────────────────────
 # Route: Barcelona WH → FedEx → Cainiao HK GFC warehouse → Cainiao ships each
@@ -784,7 +797,7 @@ def cn_max_listing_vs_flagship(flagship, size):
 
 
 cn = calc_cn(cn_purchase_net, sell_cny)
-cn_mbp = max_buy_price(calc_cn, sell_cny, target_roi) if sell_cny > 0 and cn else None
+cn_mbp = max_buy_price(calc_cn, sell_cny, target_roi("CN")) if sell_cny > 0 and cn else None
 
 if sell_cny <= 0:
     st.caption("Enter a selling price to see China results.")
@@ -793,7 +806,7 @@ else:
     a1, a2, a3 = st.columns([1, 1, 1.2])
 
     with a1:
-        st.metric(f"Max buy price @ {target_roi:.0%} ROI (EUR excl VAT)",
+        st.metric(f"Max buy price @ {target_roi('CN'):.0%} ROI (EUR excl VAT)",
                   f"{cn_mbp:.2f}" if cn_mbp is not None else "—",
                   help="Incl. VAT: ×1.21")
         if cn_mbp is not None:
