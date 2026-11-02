@@ -8,7 +8,7 @@ import streamlit as st
 st.set_page_config(page_title="UB Cost Calculator", page_icon="🐱", layout="wide",
                    initial_sidebar_state="expanded")
 st.title("UB Cost Calculator")
-st.caption("UK · AU · CA · US — side by side")
+st.caption("UK · AU · CA · US — side by side · China (Tmall Global) below")
 
 # ─── CONFIG: Load / Save ──────────────────────────────────────────────────────
 
@@ -29,7 +29,33 @@ DEFAULTS = {
     "au_ship": 10.40, "au_lab": 2.35,  "au_fba": 7.30, "au_ref": 13.0, "au_gst": 10.0, "au_tar": 5.0,
     "ca_ship": 3.12,  "ca_lab": 2.35,  "ca_fba": 7.33, "ca_ref": 15.0,
     "us_ship": 3.34,  "us_lab": 2.35,  "us_fba": 5.43, "us_ref": 15.0, "us_tar": 10.0,
+    # China / Tmall Global (added 2 Nov 2026, spec china_tmall_calculator_spec.md).
+    # EUR/CNY fallback 7.90 = Anastasia's Tmall calculator (Oct 2026); live ECB is used by default.
+    "eur_cny": 7.90,
+    # ES WH handling (labor, prep, materials, utilities) 2.60 = Anastasia's Tmall
+    # calculator (Oct 2026). ⚠️ Her 2025 "CN Costs Calculations" sheet had
+    # 2.81 + 0.44 + 0.45 = 3.70 — still to confirm which is current.
+    "cn_es_wh": 2.60,
+    # Tmall fulfilment, EUR/unit — Anastasia's estimates from actual charges.
+    "cn_tm_recv": 0.10, "cn_tm_stor": 0.30, "cn_tm_order": 1.35,
+    # Cainiao, EUR/unit — estimates from actual charges, NOT a rate card.
+    # DG storage applies to DG products only.
+    "cn_cn_basic": 2.38, "cn_cn_stor": 0.39, "cn_cn_dg_stor": 0.06,
+    "cn_comm": 4.0,      # Tmall commission, % of selling price excl. CBEC tax
 }
+
+# Inbound ES → Cainiao HK GFC, EUR per unit (1 unit = 0.5 kg). FedEx rates updated
+# Mar 2026 — Anna's sheet "Int Shipment Rates May25 (Q2 ROCKs) HK CN", tab
+# "FX ES-HK UPD Mar26". Customs = HK import declaration + FedEx brokerage.
+# DG vs NDG gap = "inaccessible DG" surcharge €31 + 43.5% fuel ≈ €44.5 per shipment.
+# Light make-up = Anna's rough estimate (volume-limited shipment, items ~50–60 g), NDG only.
+CN_INBOUND = {
+    "Large · 140 un · 70 kg":   {"DG": (5.98, 0.73),  "NDG": (5.66, 0.73)},
+    "Medium · 35 un · 17.5 kg": {"DG": (11.33, 0.73), "NDG": (10.05, 0.73)},
+    "Small · 10 un · 4.5 kg":   {"DG": (21.89, 0.79), "NDG": (17.44, 0.79)},
+    "Light make-up · ~350 un (NDG only)": {"NDG": (2.05, 0.75)},
+}
+CN_TAX_LOW, CN_TAX_HIGH, CN_TAX_THRESHOLD = 0.091, 0.2306, 10.0   # CBEC 综合税, buyer pays
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -52,8 +78,8 @@ def save_config_from_dict(updates):
 RATES_URLS = (
     # frankfurter.app now 301-redirects to frankfurter.dev — call the new host
     # first and keep the old one as a second try.
-    "https://api.frankfurter.dev/v1/latest?base=EUR&symbols=GBP,AUD,USD,CAD",
-    "https://api.frankfurter.app/latest?from=EUR&to=GBP,AUD,USD,CAD",
+    "https://api.frankfurter.dev/v1/latest?base=EUR&symbols=GBP,AUD,USD,CAD,CNY",
+    "https://api.frankfurter.app/latest?from=EUR&to=GBP,AUD,USD,CAD,CNY",
 )
 
 
@@ -76,6 +102,7 @@ def _fetch_live_rates_cached():
                     "eur_aud": round(rates["AUD"], 4),
                     "eur_usd": round(rates["USD"], 4),
                     "usd_cad": round(rates["CAD"] / rates["USD"], 4),
+                    "eur_cny": round(rates["CNY"], 4),
                     "date": data.get("date", "unknown"),
                 }
             except Exception as e:
@@ -306,7 +333,7 @@ with st.sidebar:
                  "drift away from the Products Analyzer. Off: the manual values below are used.")
         if live:
             st.caption(f"Live ECB ({live['date']}): GBP {live['eur_gbp']} · AUD {live['eur_aud']} · "
-                       f"USD {live['eur_usd']} · CAD/USD {live['usd_cad']}")
+                       f"USD {live['eur_usd']} · CAD/USD {live['usd_cad']} · CNY {live['eur_cny']}")
         else:
             st.caption(f"⚠️ Live rates unavailable ({rates_err}) — the manual values below are used.")
             if st.button("Retry live rates"):
@@ -316,12 +343,13 @@ with st.sidebar:
         eur_aud = st.number_input("EUR → AUD", value=cfg["eur_aud"], step=0.001, format="%.4f", key="eur_aud")
         eur_usd = st.number_input("EUR → USD", value=cfg["eur_usd"], step=0.001, format="%.4f", key="eur_usd")
         usd_cad = st.number_input("USD → CAD", value=cfg["usd_cad"], step=0.001, format="%.4f", key="usd_cad")
+        eur_cny = st.number_input("EUR → CNY", value=cfg["eur_cny"], step=0.01, format="%.4f", key="eur_cny")
 
         # Live rates win when auto is on — the manual boxes above stay visible so
         # you can see (and, with auto off, set) what would be used instead.
         if auto_rates and live:
-            eur_gbp, eur_aud, eur_usd, usd_cad = (live["eur_gbp"], live["eur_aud"],
-                                                  live["eur_usd"], live["usd_cad"])
+            eur_gbp, eur_aud, eur_usd, usd_cad, eur_cny = (
+                live["eur_gbp"], live["eur_aud"], live["eur_usd"], live["usd_cad"], live["eur_cny"])
             rates_source = f"live ECB {live['date']}"
         else:
             rates_source = "manual values"
@@ -363,6 +391,23 @@ with st.sidebar:
         st.caption("Import tariff in COGS (on product + shipping). No sales tax stripped — "
                    "Amazon collects and remits it. Digital svc fee on the referral fee ONLY, "
                    "which is what Seller Snap shows for US.")
+
+    with st.expander("🇨🇳  China (Tmall Global) Parameters", expanded=False):
+        cn_es_wh      = st.number_input("ES WH handling / unit (EUR)", value=cfg["cn_es_wh"], step=0.10, format="%.2f", key="cn_es_wh",
+                                        help="Labor, prep, materials, utilities. 2.60 = Anastasia's Tmall calculator (Oct 2026); "
+                                             "her 2025 sheet had 3.70 — to confirm.")
+        st.caption("Tmall fulfilment (EUR / unit)")
+        cn_tm_recv    = st.number_input("Receiving",            value=cfg["cn_tm_recv"],    step=0.01, format="%.2f", key="cn_tm_recv")
+        cn_tm_stor    = st.number_input("Storage",              value=cfg["cn_tm_stor"],    step=0.01, format="%.2f", key="cn_tm_stor")
+        cn_tm_order   = st.number_input("Order management",     value=cfg["cn_tm_order"],   step=0.01, format="%.2f", key="cn_tm_order")
+        st.caption("Cainiao (EUR / unit)")
+        cn_cn_basic   = st.number_input("Basic service (non-OTC)", value=cfg["cn_cn_basic"], step=0.01, format="%.2f", key="cn_cn_basic")
+        cn_cn_stor    = st.number_input("Storage",          value=cfg["cn_cn_stor"],    step=0.01, format="%.2f", key="cn_cn_stor")
+        cn_cn_dg_stor = st.number_input("DG storage (DG only)", value=cfg["cn_cn_dg_stor"], step=0.01, format="%.2f", key="cn_cn_dg_stor")
+        cn_comm       = st.number_input("Tmall commission (%)", value=cfg["cn_comm"],       step=0.5,  format="%.1f", key="cn_comm") / 100
+        st.caption("Tmall and Cainiao fees are estimates from actual charges, not a rate card. "
+                   "Annual fee (¥30,000), deposit (¥100,000) and agency fees are opex, not in COGS. "
+                   "Inbound ES → HK rates are per shipment size, chosen in the China section.")
 
     st.markdown("---")
     if st.button("💾 Save Parameters", use_container_width=True):
@@ -637,3 +682,215 @@ with col3:
     render_market("🇨🇦  Canada",         ca, sell_cad > 0,    mbp["CA"])
 with col4:
     render_market("🇺🇸  United States",  us, sell_usd_in > 0, mbp["US"])
+
+# ─── CHINA (TMALL GLOBAL) ─────────────────────────────────────────────────────
+# Route: Barcelona WH → FedEx → Cainiao HK GFC warehouse → Cainiao ships each
+# order cross-border to the buyer in mainland China. Same UB method as the other
+# markets: ROI = PPU / COGS. All values in EUR (CNY shown alongside).
+# The CBEC import tax (综合税) is paid by the BUYER on top of the listing price,
+# so it does not reduce our revenue — it is shown only for competitiveness.
+
+st.divider()
+st.subheader("🇨🇳  China — Tmall Global")
+st.caption("Barcelona → FedEx → Cainiao HK → buyer in mainland China. Enter the Tmall listing "
+           "price excl. CBEC tax (the buyer pays the tax on top).")
+
+k1, k2, k3, k4 = st.columns([1.2, 1, 1, 1.2])
+with k1:
+    cn_purchase_in = st.number_input(
+        "Purchase price (EUR)", min_value=0.0, value=purchase_eur, step=0.50, format="%.2f",
+        key="cn_purchase", help="Prefilled from the purchase price above; edit it here for China only")
+    cn_incl_vat = st.toggle("Includes Spanish VAT 21%", value=False, key="cn_incl_vat",
+                            help="On: net purchase = price / 1.21 (Spanish VAT is recoverable)")
+with k2:
+    sell_cny = st.number_input("Selling price (CNY, excl. CBEC tax)", min_value=0.0, value=0.0,
+                               step=1.0, format="%.2f", key="cn_sell")
+    cn_size = st.number_input("Size (ml or g)", min_value=0.0, value=0.0, step=5.0, format="%.0f",
+                              key="cn_size", help="Needed for the ¥10/ml CBEC tax threshold")
+with k3:
+    cn_type = st.radio("Product type", ["DG", "NDG"], horizontal=True, key="cn_type",
+                       help="DG = perfume / alcohol. NDG = cosmetics without alcohol.")
+    ship_options = [s for s in CN_INBOUND if cn_type in CN_INBOUND[s]] + ["Custom"]
+    cn_ship = st.selectbox("Shipment size (ES → HK)", ship_options, index=0, key="cn_ship")
+with k4:
+    cn_flagship = st.number_input("Flagship / competitor price (CNY, buyer pays)", min_value=0.0,
+                                  value=0.0, step=1.0, format="%.2f", key="cn_flagship",
+                                  help="Optional. The price the buyer pays incl. tax, for the competitiveness check")
+    if cn_ship == "Custom":
+        cn_custom_del = st.number_input("Inbound delivery / unit (EUR)", min_value=0.0, value=0.0,
+                                        step=0.10, format="%.2f", key="cn_custom_del")
+        cn_custom_cus = st.number_input("Inbound customs / unit (EUR)", min_value=0.0, value=0.0,
+                                        step=0.05, format="%.2f", key="cn_custom_cus")
+
+cn_purchase_net = cn_purchase_in / 1.21 if cn_incl_vat else cn_purchase_in
+
+
+def cn_inbound(ptype, ship):
+    """(delivery, customs) EUR/unit for a product type and shipment size; None if n/a."""
+    if ship == "Custom":
+        return cn_custom_del, cn_custom_cus
+    return CN_INBOUND.get(ship, {}).get(ptype)
+
+
+def cn_tax_rate(price_cny, size):
+    """CBEC tax rate the buyer pays: 23.06% at ≥ ¥10/ml, else 9.1% (a cliff, not a gradient).
+    23.06% = (13% VAT + 15% consumption tax) / (1 − 15%) × 70%; 9.1% = 13% × 70%."""
+    if size <= 0:
+        return None
+    return CN_TAX_HIGH if price_cny / size >= CN_TAX_THRESHOLD else CN_TAX_LOW
+
+
+def calc_cn(p_eur, s_cny, ptype=None, ship=None):
+    """China unit economics in EUR. Same dict shape as the other markets, so the
+    generic max_buy_price() works on it. p_eur = NET purchase price (excl. VAT)."""
+    ptype, ship = ptype or cn_type, ship or cn_ship
+    inbound = cn_inbound(ptype, ship)
+    if inbound is None:
+        return None
+    delivery, customs = inbound
+    price_eur = s_cny / eur_cny
+    cogs = p_eur + cn_es_wh + delivery + customs
+    fixed = (cn_tm_recv + cn_tm_stor + cn_tm_order + cn_cn_basic + cn_cn_stor
+             + (cn_cn_dg_stor if ptype == "DG" else 0.0))
+    comm = cn_comm * price_eur
+    fees = fixed + comm
+    ppu = price_eur - cogs - fees
+    return dict(cur="EUR", purchase=p_eur, es_wh=cn_es_wh, delivery=delivery, customs=customs,
+                cogs=cogs, sell_ex=price_eur, fixed=fixed, comm=comm, fees=fees,
+                cost=cogs + fees, ppu=ppu,
+                roi=ppu / cogs if cogs > 0 else 0,
+                margin=ppu / price_eur if price_eur > 0 else 0)
+
+
+def cn_target_price_eur(cogs, fixed, roi):
+    """Listing price (EUR) that gives this ROI: ((1 + r)·COGS + fixed fees) / (1 − commission)."""
+    return ((1 + roi) * cogs + fixed) / (1 - cn_comm)
+
+
+def cn_max_listing_vs_flagship(flagship, size):
+    """Highest listing price (CNY, excl. tax) whose buyer price does not exceed the flagship.
+    The bracket depends on the listing price itself, so each bracket is tried and
+    only a self-consistent answer is kept."""
+    if flagship <= 0:
+        return None
+    if size <= 0:
+        return None
+    best = None
+    for rate in (CN_TAX_HIGH, CN_TAX_LOW):
+        cand = flagship / (1 + rate)
+        if cn_tax_rate(cand, size) == rate:
+            best = cand if best is None else max(best, cand)
+    return best
+
+
+cn = calc_cn(cn_purchase_net, sell_cny)
+cn_mbp = max_buy_price(calc_cn, sell_cny, target_roi) if sell_cny > 0 and cn else None
+
+if sell_cny <= 0:
+    st.caption("Enter a selling price to see China results.")
+else:
+    st.caption(f"Rate in use: EUR→CNY {eur_cny:.4f} ({rates_source}) · {cn_type} · {cn_ship}")
+    a1, a2, a3 = st.columns([1, 1, 1.2])
+
+    with a1:
+        st.metric(f"Max buy price @ {target_roi:.0%} ROI (EUR excl VAT)",
+                  f"{cn_mbp:.2f}" if cn_mbp is not None else "—",
+                  help="Incl. VAT: ×1.21")
+        if cn_mbp is not None:
+            st.caption(f"= {cn_mbp * 1.21:.2f} EUR incl. Spanish VAT")
+        else:
+            st.caption("Target ROI not reachable at this price, even at a zero purchase price.")
+        if cn_purchase_net > 0:
+            st.metric("ROI", f"{cn['roi']:.2%}")
+            st.markdown(f"{roi_icon(cn['roi'])} Margin **{cn['margin']:.2%}**")
+        else:
+            st.caption("Enter a purchase price to see ROI and profit.")
+
+    with a2:
+        if cn_purchase_net > 0:
+            m1, m2 = st.columns(2)
+            m1.metric("Profit / PPU (EUR)", f"{cn['ppu']:.2f}")
+            m2.metric("PPU (CNY)", f"{cn['ppu'] * eur_cny:.2f}")
+            m3, m4 = st.columns(2)
+            m3.metric("COGS (EUR)", f"{cn['cogs']:.2f}")
+            m4.metric("Cost / unit (EUR)", f"{cn['cost']:.2f}")
+            with st.expander("Full breakdown"):
+                rows = [
+                    ("Net purchase", cn["purchase"]), ("ES WH handling", cn["es_wh"]),
+                    ("Inbound delivery ES → HK", cn["delivery"]), ("Inbound customs (HK + brokerage)", cn["customs"]),
+                    ("**COGS**", cn["cogs"]), ("---", None),
+                    ("Tmall receiving", cn_tm_recv), ("Tmall storage", cn_tm_stor),
+                    ("Tmall order management", cn_tm_order), ("Cainiao basic service", cn_cn_basic),
+                    ("Cainiao storage", cn_cn_stor),
+                ]
+                if cn_type == "DG":
+                    rows.append(("Cainiao DG storage", cn_cn_dg_stor))
+                rows += [(f"Tmall commission {cn_comm:.0%}", cn["comm"]),
+                         ("**Platform fees**", cn["fees"]), ("---", None),
+                         ("Selling price (EUR)", cn["sell_ex"]), ("**Cost per unit**", cn["cost"]),
+                         ("**Profit / PPU**", cn["ppu"])]
+                for label, val in rows:
+                    if val is None:
+                        st.markdown("---")
+                    elif label.startswith("**"):
+                        st.markdown(f"{label} (EUR): **{val:.2f}**")
+                    else:
+                        st.write(f"{label} (EUR): {val:.2f}")
+
+    with a3:
+        st.markdown("**CBEC import tax** (buyer pays, not in our costs)")
+        rate = cn_tax_rate(sell_cny, cn_size)
+        if rate is None:
+            st.caption("Enter the size to see the tax bracket.")
+        else:
+            per_ml = sell_cny / cn_size
+            buyer = sell_cny * (1 + rate)
+            st.write(f"¥{per_ml:.2f} per ml/g → tax **{rate:.2%}** · buyer pays **¥{buyer:,.2f}**")
+            if 0.9 * CN_TAX_THRESHOLD <= per_ml < 1.1 * CN_TAX_THRESHOLD:
+                st.warning(f"Close to the ¥{CN_TAX_THRESHOLD:.0f}/ml threshold: at ≥ ¥{CN_TAX_THRESHOLD * cn_size:,.0f} "
+                           f"the tax jumps from 9.1% to 23.06% (below ¥{CN_TAX_THRESHOLD * cn_size:,.0f} it is 9.1%).")
+            if cn_flagship > 0:
+                gap = buyer / cn_flagship - 1
+                st.write(f"vs flagship ¥{cn_flagship:,.2f}: our buyer price is **{gap:+.1%}**")
+                max_list = cn_max_listing_vs_flagship(cn_flagship, cn_size)
+                if max_list is not None:
+                    st.caption(f"Max listing price to match the flagship: ¥{max_list:,.2f} "
+                               f"(buyer pays ¥{max_list * (1 + cn_tax_rate(max_list, cn_size)):,.2f}). "
+                               f"Tmall usually needs ~18–20% below flagship to sell.")
+            if buyer > 5000:
+                st.error("Buyer price above ¥5,000: over the CBEC per-order limit.")
+        st.caption("Buyer limits: ¥5,000 per order, ¥26,000 per year.")
+
+    # Target prices by ROI (needs a purchase price for COGS)
+    if cn_purchase_net > 0:
+        st.markdown("**Target listing price by ROI**")
+        trows = []
+        for r in (0.0, 0.10, 0.20, 0.30, 0.50):
+            p_eur = cn_target_price_eur(cn["cogs"], cn["fixed"], r)
+            p_cny = p_eur * eur_cny
+            t = cn_tax_rate(p_cny, cn_size)
+            trows.append({"ROI": "break-even" if r == 0 else f"{r:.0%}",
+                          "Listing price (CNY)": f"{p_cny:,.2f}",
+                          "Listing price (EUR)": f"{p_eur:,.2f}",
+                          "Tax bracket": f"{t:.2%}" if t is not None else "enter size",
+                          "Buyer pays (CNY)": f"{p_cny * (1 + t):,.2f}" if t is not None else "—"})
+        st.table(trows)
+
+        # DG vs NDG for the chosen shipment size
+        st.markdown("**DG vs NDG** at this price and shipment size")
+        cmp = []
+        for ptype in ("DG", "NDG"):
+            d = calc_cn(cn_purchase_net, sell_cny, ptype=ptype)
+            if d is None:
+                cmp.append({"Type": ptype, "COGS (EUR)": "n/a for this shipment size",
+                            "Platform fees (EUR)": "", "PPU (EUR)": "", "ROI": ""})
+            else:
+                cmp.append({"Type": ptype, "COGS (EUR)": f"{d['cogs']:.2f}",
+                            "Platform fees (EUR)": f"{d['fees']:.2f}",
+                            "PPU (EUR)": f"{d['ppu']:.2f}", "ROI": f"{d['roi']:.2%}"})
+        st.table(cmp)
+
+st.caption("China open items: ES WH handling 2.60 vs 3.70 per unit · Cainiao fees are estimates "
+           "(no rate card yet) · HK → mainland last mile assumed inside the Cainiao basic fee · "
+           "Nov 2026 shipment template uses €19.48/unit flat logistics (source unknown) · "
+           "fuel (43.5% in Mar 2026) and demand surcharges change often.")
