@@ -700,13 +700,54 @@ with col4:
 # Route: Barcelona WH → FedEx → Cainiao HK GFC warehouse → Cainiao ships each
 # order cross-border to the buyer in mainland China. Same UB method as the other
 # markets: ROI = PPU / COGS. All values in EUR (CNY shown alongside).
-# The CBEC import tax (综合税) is paid by the BUYER on top of the listing price,
-# so it does not reduce our revenue — it is shown only for competitiveness.
+# The CBEC import tax (综合税) is never our revenue. Tmall shows it either on top of
+# the price (buyer pays price + tax) or inside it (价格已含税, e.g. Double 11 2026
+# promos) — either way our revenue is the price excl. tax, so ROI uses that number.
+
+
+def cn_tax_rate(price_cny, size):
+    """CBEC tax rate on a price EXCL. tax: 23.06% at ≥ ¥10/ml, else 9.1% (a cliff, not a gradient).
+    23.06% = (13% VAT + 15% consumption tax) / (1 − 15%) × 70%; 9.1% = 13% × 70%."""
+    if size <= 0:
+        return None
+    return CN_TAX_HIGH if price_cny / size >= CN_TAX_THRESHOLD else CN_TAX_LOW
+
+
+def cn_net_from_gross(gross, size):
+    """(price excl. tax, rate, consistent) from a price incl. tax. The bracket is judged on
+    the excl.-tax price, so only one rate can be self-consistent. Between ¥10.91 and
+    ¥12.31/ml incl. tax neither is: 23.06% is used (lower revenue) and consistent=False.
+    No size: 9.1% assumed."""
+    if size <= 0:
+        return gross / (1 + CN_TAX_LOW), CN_TAX_LOW, True
+    for rate in (CN_TAX_HIGH, CN_TAX_LOW):
+        net = gross / (1 + rate)
+        if cn_tax_rate(net, size) == rate:
+            return net, rate, True
+    return gross / (1 + CN_TAX_HIGH), CN_TAX_HIGH, False
+
+
+# The two price fields stay linked; the one typed last is the source of truth.
+ss = st.session_state
+ss.setdefault("cn_sell", 0.0)
+ss.setdefault("cn_sell_gross", 0.0)
+ss.setdefault("cn_last_edited", "net")
+
+def _cn_sync(source=None):
+    if source:
+        ss["cn_last_edited"] = source
+    size = ss.get("cn_size", 0.0)
+    if ss["cn_last_edited"] == "net":
+        rate = cn_tax_rate(ss["cn_sell"], size) or CN_TAX_LOW
+        ss["cn_sell_gross"] = round(ss["cn_sell"] * (1 + rate), 2)
+    else:
+        ss["cn_sell"] = round(cn_net_from_gross(ss["cn_sell_gross"], size)[0], 2)
 
 st.divider()
 st.subheader("🇨🇳  China — Tmall Global")
-st.caption("Barcelona → FedEx → Cainiao HK → buyer in mainland China. Enter the Tmall listing "
-           "price excl. CBEC tax (the buyer pays the tax on top).")
+st.caption("Barcelona → FedEx → Cainiao HK → buyer in mainland China. Enter the selling price "
+           "either excl. or incl. CBEC import tax — the other fills in. Our revenue is always the "
+           "price excl. tax, whether Tmall shows the tax on top or inside the price (价格已含税).")
 
 k1, k2, k3, k4 = st.columns([1.2, 1, 1, 1.2])
 with k1:
@@ -716,10 +757,23 @@ with k1:
     cn_incl_vat = st.toggle("Includes Spanish VAT 21%", value=False, key="cn_incl_vat",
                             help="On: net purchase = price / 1.21 (Spanish VAT is recoverable)")
 with k2:
-    sell_cny = st.number_input("Selling price (CNY, excl. CBEC tax)", min_value=0.0, value=0.0,
-                               step=1.0, format="%.2f", key="cn_sell")
+    sell_cny = st.number_input("Selling price excl. CBEC tax (CNY) — our revenue", min_value=0.0,
+                               step=1.0, format="%.2f", key="cn_sell",
+                               on_change=_cn_sync, args=("net",))
+    st.number_input("Selling price incl. CBEC tax (CNY) — buyer pays", min_value=0.0,
+                    step=1.0, format="%.2f", key="cn_sell_gross",
+                    on_change=_cn_sync, args=("gross",),
+                    help="Use this when the Tmall price already includes the tax (价格已含税), "
+                         "e.g. Double 11 promo prices")
     cn_size = st.number_input("Size (ml or g)", min_value=0.0, value=0.0, step=5.0, format="%.0f",
-                              key="cn_size", help="Needed for the ¥10/ml CBEC tax threshold")
+                              key="cn_size", on_change=_cn_sync,
+                              help="Sets the tax bracket: 9.1% below ¥10/ml (excl. tax), 23.06% at ¥10/ml or more")
+    if ss["cn_sell_gross"] > 0 and cn_size <= 0:
+        st.caption("No size entered: 9.1% tax assumed.")
+    elif ss["cn_last_edited"] == "gross" and ss["cn_sell_gross"] > 0 \
+            and not cn_net_from_gross(ss["cn_sell_gross"], cn_size)[2]:
+        st.warning("This price incl. tax sits in the tax jump (¥10.91–¥12.31/ml): no bracket fits, "
+                   "23.06% assumed. Tmall's own split may differ — check the order.")
 with k3:
     cn_type = st.radio("Product type", ["DG", "NDG"], horizontal=True, key="cn_type",
                        help="DG = perfume / alcohol. NDG = cosmetics without alcohol.")
@@ -743,14 +797,6 @@ def cn_inbound(ptype, ship):
     if ship == "Custom":
         return cn_custom_del, cn_custom_cus
     return CN_INBOUND.get(ship, {}).get(ptype)
-
-
-def cn_tax_rate(price_cny, size):
-    """CBEC tax rate the buyer pays: 23.06% at ≥ ¥10/ml, else 9.1% (a cliff, not a gradient).
-    23.06% = (13% VAT + 15% consumption tax) / (1 − 15%) × 70%; 9.1% = 13% × 70%."""
-    if size <= 0:
-        return None
-    return CN_TAX_HIGH if price_cny / size >= CN_TAX_THRESHOLD else CN_TAX_LOW
 
 
 def calc_cn(p_eur, s_cny, ptype=None, ship=None):
@@ -851,7 +897,7 @@ else:
                         st.write(f"{label} (EUR): {val:.2f}")
 
     with a3:
-        st.markdown("**CBEC import tax** (buyer pays, not in our costs)")
+        st.markdown("**CBEC import tax** (never our revenue, not in our costs)")
         rate = cn_tax_rate(sell_cny, cn_size)
         if rate is None:
             st.caption("Enter the size to see the tax bracket.")
