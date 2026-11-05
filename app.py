@@ -919,6 +919,16 @@ else:
             if buyer > 5000:
                 st.error("Buyer price above ¥5,000: over the CBEC per-order limit.")
         st.caption("Buyer limits: ¥5,000 per order, ¥26,000 per year.")
+        with st.expander("How the CBEC tax rate works"):
+            st.markdown(
+                "The bracket is set by the price **excl. tax** per ml or g — a cliff, not a gradient.\n\n"
+                "- **Under ¥10/ml:** VAT only, so 13% × 70% = **9.1%**\n"
+                "- **¥10/ml or more:** VAT + consumption tax, so (13% + 15%) / (1 − 15%) × 70% = **23.06%**. "
+                "The division by (1 − 15%) is how China calculates consumption tax: it is charged on a "
+                "price that already includes the tax itself.\n\n"
+                "70% = the CBEC discount on the normal import rates; import duty is 0% within the buyer limits.\n\n"
+                "Example: Givenchy 80 ml at ¥558 excl. tax = ¥6.98/ml → 9.1% → buyer pays ¥609. "
+                "For 80 ml the line is ¥800 excl. tax.")
 
     # Target prices by ROI (needs a purchase price for COGS)
     if cn_purchase_net > 0:
