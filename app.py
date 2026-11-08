@@ -397,7 +397,7 @@ with st.sidebar:
                                         help="Labor, prep, materials, utilities. 2.60 = Anastasia's Tmall calculator (Oct 2026); "
                                              "her 2025 sheet had 3.70 — to confirm.")
         st.caption("Tmall fulfilment (EUR / unit)")
-        cn_tm_recv    = st.number_input("Receiving",            value=cfg["cn_tm_recv"],    step=0.01, format="%.2f", key="cn_tm_recv")
+        cn_tm_recv    = st.number_input("Receiving (in COGS)",  value=cfg["cn_tm_recv"],    step=0.01, format="%.2f", key="cn_tm_recv")
         cn_tm_stor    = st.number_input("Storage",              value=cfg["cn_tm_stor"],    step=0.01, format="%.2f", key="cn_tm_stor")
         cn_tm_order   = st.number_input("Order management",     value=cfg["cn_tm_order"],   step=0.01, format="%.2f", key="cn_tm_order")
         st.caption("Cainiao (EUR / unit)")
@@ -808,8 +808,9 @@ def calc_cn(p_eur, s_cny, ptype=None, ship=None):
         return None
     delivery, customs = inbound
     price_eur = s_cny / eur_cny
-    cogs = p_eur + cn_es_wh + delivery + customs
-    fixed = (cn_tm_recv + cn_tm_stor + cn_tm_order + cn_cn_basic + cn_cn_stor
+    # Receiving is part of COGS (UB definition: COGS = purchase + additional costs incl. receiving)
+    cogs = p_eur + cn_es_wh + delivery + customs + cn_tm_recv
+    fixed = (cn_tm_stor + cn_tm_order + cn_cn_basic + cn_cn_stor
              + (cn_cn_dg_stor if ptype == "DG" else 0.0))
     comm = cn_comm * price_eur
     fees = fixed + comm
@@ -877,8 +878,9 @@ else:
                 rows = [
                     ("Net purchase", cn["purchase"]), ("ES WH handling", cn["es_wh"]),
                     ("Inbound delivery ES → HK", cn["delivery"]), ("Inbound customs (HK + brokerage)", cn["customs"]),
+                    ("Cainiao receiving", cn_tm_recv),
                     ("**COGS**", cn["cogs"]), ("---", None),
-                    ("Tmall receiving", cn_tm_recv), ("Tmall storage", cn_tm_stor),
+                    ("Tmall storage", cn_tm_stor),
                     ("Tmall order management", cn_tm_order), ("Cainiao basic service", cn_cn_basic),
                     ("Cainiao storage", cn_cn_stor),
                 ]
