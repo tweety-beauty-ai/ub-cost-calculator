@@ -28,23 +28,23 @@ def check(name, got, want):
 # Test 1 — DG, €75 net, ¥1,089, 100 ml, Large, rate 7.80
 at = run("app.py", eur_cny=7.80, cn_purchase=75.0, cn_sell=1089.0, cn_size=100.0)
 m, t = metrics(at), text(at)
-check("T1 ROI", m["ROI"], "53.54%")
-check("T1 COGS", m["COGS (EUR)"], "84.31")
+check("T1 ROI", m["ROI"], "53.48%")   # receiving moved into COGS (Nov 2026)
+check("T1 COGS", m["COGS (EUR)"], "84.41")
 check("T1 PPU", m["Profit / PPU (EUR)"], "45.14")
 check("T1 cost/unit", m["Cost / unit (EUR)"], "94.47")
 check("T1 margin", "Margin **32.33%**" in t, True)
 check("T1 tax+buyer", "tax **23.06%** · buyer pays **¥1,340.12**" in t, True)
-check("T1 fees", "**Platform fees** (EUR): **10.16**" in t, True)
+check("T1 fees", "**Platform fees** (EUR): **10.06**" in t, True)
 
 # Test 2 — NDG, €20 net, ¥350, 30 g, Light make-up
 at = run("app.py", eur_cny=7.80, cn_type="NDG", cn_ship="Light make-up · ~350 un (NDG only)",
          cn_purchase=20.0, cn_sell=350.0, cn_size=30.0)
 m, t = metrics(at), text(at)
-check("T2 ROI", m["ROI"], "51.80%")
-check("T2 COGS", m["COGS (EUR)"], "25.40")
+check("T2 ROI", m["ROI"], "51.60%")
+check("T2 COGS", m["COGS (EUR)"], "25.50")
 check("T2 PPU", m["Profit / PPU (EUR)"], "13.16")
 check("T2 buyer", "buyer pays **¥430.71**" in t, True)
-check("T2 fees", "**Platform fees** (EUR): **6.31**" in t, True)
+check("T2 fees", "**Platform fees** (EUR): **6.21**" in t, True)
 
 # Round-trip: buying at the max buy price gives the target ROI (17%)
 at = run("app.py", eur_cny=7.80, cn_sell=1089.0, cn_size=100.0)
